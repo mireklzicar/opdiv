@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "opdiv"
+version = "0.1.0"
+description = "Molecular portfolio selection and diversity evaluation"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{name = "Miroslav Lzicar"}]
+keywords = ["cheminformatics", "diversity", "portfolio", "molecule-selection"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Chemistry",
+    "Typing :: Typed",
+]
+dependencies = ["numpy>=1.23", "scipy>=1.11"]
+
+[project.optional-dependencies]
+chem = ["rdkit>=2023.9"]
+dev = ["pytest>=7", "build>=1.2", "twine>=5", "ruff>=0.6"]
+
+[project.urls]
+Repository = "https://github.com/mireklzicar/opdiv"
+Issues = "https://github.com/mireklzicar/opdiv/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+opdiv = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B"]
