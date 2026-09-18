@@ -1,10 +1,11 @@
 from itertools import combinations
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
-from scipy.optimize import OptimizeResult
+from ortools.sat.python import cp_model
 
-from opdiv import MetricUndefinedError, cpdiv, gpdiv, opdiv, select, select_clusters
+from opdiv import MetricUndefinedError, gpdiv, opdiv, select
 
 
 def graph():
@@ -79,30 +80,25 @@ def test_positive_affine_score_transform_preserves_selection(scale, offset):
     assert result.value == pytest.approx(float(q[[1, 2]].mean()))
 
 
-@pytest.mark.parametrize("cap", [1, 2, 4])
-def test_clusters_against_enumeration(cap):
-    q = np.array([5, 4, -1, -2, -3.0])
-    labels = ["a", "a", "b", "b", "c"]
-    for k in range(1, 7):
-        values = [
-            q[list(s)].mean()
-            for s in combinations(range(len(q)), k)
-            if all(sum(labels[i] == label for i in s) <= cap for label in set(labels))
-        ]
-        result = select_clusters(q, k, labels, cap=cap)
-        if values:
-            assert result.status == "optimal"
-            assert cpdiv(q, k, labels, cap=cap) == pytest.approx(max(values))
-        else:
-            assert result.status == "infeasible" and result.value is None
-            with pytest.raises(MetricUndefinedError):
-                cpdiv(q, k, labels, cap=cap)
+def mock_solver(monkeypatch, code, selected=(), bound=0):
+    class Solver:
+        parameters = SimpleNamespace()
+        best_objective_bound = bound
+
+        def solve(self, model):
+            return code
+
+        def value(self, var):
+            return var.index in selected
+
+        def solution_info(self):
+            return "mock model error"
+
+    monkeypatch.setattr("opdiv._core.cp_model.CpSolver", Solver)
 
 
 def test_timeout_retains_greedy_and_refuses_scalar_metric(monkeypatch):
-    monkeypatch.setattr(
-        "opdiv._core.milp", lambda *a, **kw: OptimizeResult(status=1, x=None, mip_dual_bound=None)
-    )
+    mock_solver(monkeypatch, cp_model.UNKNOWN)
     result = select([16, 12, 11, 6], 2, conflicts=graph(), time_limit=0.001)
     assert result.status == "feasible"
     assert result.indices == (0, 3)
@@ -116,20 +112,16 @@ def test_timeout_retains_greedy_and_refuses_scalar_metric(monkeypatch):
 
 
 def test_timeout_with_solver_incumbent_and_bound(monkeypatch):
-    monkeypatch.setattr(
-        "opdiv._core.milp",
-        lambda *a, **kw: OptimizeResult(status=1, x=np.array([0, 1, 1, 0]), mip_dual_bound=-0.4),
-    )
+    mock_solver(monkeypatch, cp_model.FEASIBLE, selected=(1, 2), bound=400_000_000)
     result = select([16, 12, 11, 6], 2, conflicts=graph(), time_limit=0.001)
     assert result.status == "feasible"
-    assert result.value == 11.5 and result.upper_bound == 12
-    assert result.gap == 0.5
+    assert result.value == 11.5
+    assert result.upper_bound == pytest.approx(12)
+    assert result.gap == pytest.approx(0.5)
 
 
 def test_rejects_invalid_solver_portfolio(monkeypatch):
-    monkeypatch.setattr(
-        "opdiv._core.milp", lambda *a, **kw: OptimizeResult(status=0, x=np.array([1, 1, 0, 0]))
-    )
+    mock_solver(monkeypatch, cp_model.OPTIMAL, selected=(0, 1))
     with pytest.raises(RuntimeError, match="invalid portfolio"):
         select([16, 12, 11, 6], 2, conflicts=graph())
 
@@ -164,10 +156,40 @@ def test_invalid_inputs(scores, k, kwargs):
         select(scores, k, **kwargs)
 
 
-@pytest.mark.parametrize(
-    "labels,cap",
-    [(["a"], 1), ([None, "a"], 1), ([[], "a"], 1), ([np.nan, "a"], 1), (["a", "b"], 0)],
-)
-def test_invalid_clusters(labels, cap):
-    with pytest.raises(ValueError):
-        select_clusters([1, 2], 1, labels, cap=cap)
+@pytest.mark.parametrize("seed", range(12))
+def test_rounding_bounds_cover_original_float_optimum(seed):
+    rng = np.random.default_rng(seed)
+    q = rng.uniform(-1, 1, 8)
+    a = np.triu(rng.random((8, 8)) < 0.3, 1)
+    a |= a.T
+    k = 3
+    feasible = [q[list(s)].mean() for s in combinations(range(8), k) if not a[np.ix_(s, s)].any()]
+    result = select(q, k, conflicts=a)
+    if feasible:
+        optimum = max(feasible)
+        assert result.value <= optimum + 1e-14
+        assert result.upper_bound >= optimum - 1e-14
+        assert result.gap <= 1e-8 * np.ptp(q)
+
+
+def test_integer_optimum_does_not_hide_rounding_gap(monkeypatch):
+    # Both portfolios tie after integer rounding; B,C have better real utility.
+    q = [1, 0.75, 0.75000000001, 0.5]
+    mock_solver(monkeypatch, cp_model.OPTIMAL, selected=(0, 3), bound=0)
+    result = select(q, 2, conflicts=graph())
+    assert result.value == 0.75
+    assert result.upper_bound >= np.mean(q[1:3])
+    assert result.gap > 0
+
+
+def test_model_errors_are_not_reported_as_infeasibility(monkeypatch):
+    mock_solver(monkeypatch, cp_model.MODEL_INVALID)
+    with pytest.raises(RuntimeError, match="mock model error"):
+        select([16, 12, 11, 6], 2, conflicts=graph())
+
+
+def test_public_api_contains_only_pairwise_metrics():
+    import opdiv as package
+
+    assert not hasattr(package, "cpdiv")
+    assert not hasattr(package, "select_clusters")

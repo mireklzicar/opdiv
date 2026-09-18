@@ -30,7 +30,7 @@ def tanimoto_similarity(
 ) -> NDArray[np.float64]:
     """Morgan bit-fingerprint Tanimoto matrix; requires ``opdiv[chem]``.
 
-    Uses chirality and preserves input order. Invalid, empty, or duplicate
+    Uses no chirality, matching the paper, and preserves input order. Invalid, empty, or duplicate
     canonical isomeric SMILES raise ValueError. No salt/tautomer normalization
     is performed; establish your molecular identity policy before calling.
     """
@@ -46,7 +46,7 @@ def tanimoto_similarity(
         if isinstance(value, bool) or not isinstance(value, (int, np.integer)) or value < minimum:
             raise ValueError(f"{name} must be an integer >= {minimum}")
     generator = rdFingerprintGenerator.GetMorganGenerator(
-        radius=int(radius), fpSize=int(n_bits), includeChirality=True
+        radius=int(radius), fpSize=int(n_bits), includeChirality=False
     )
     fingerprints, seen = [], set()
     for i, text in enumerate(smiles):

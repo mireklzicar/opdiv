@@ -1,0 +1,57 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    if: github.repository == 'mireklzicar/opdiv'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Install and test
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install '.[chem,dev]'
+          python -m pytest
+          ruff check .
+      - name: Check release version
+        run: |
+          python - <<'PY'
+          import os
+          import tomllib
+          import opdiv
+          with open('pyproject.toml', 'rb') as f:
+              version = tomllib.load(f)['project']['version']
+          assert opdiv.__version__ == version
+          assert os.environ['GITHUB_REF_NAME'] == f'v{version}'
+          PY
+      - name: Build and check distributions
+        run: |
+          python -m build
+          python -m twine check --strict dist/*
+      - name: Smoke test the wheel
+        run: |
+          python -m venv /tmp/opdiv-wheel
+          /tmp/opdiv-wheel/bin/python -m pip install dist/*.whl
+          cd /tmp
+          /tmp/opdiv-wheel/bin/python - <<'PY'
+          from opdiv import opdiv, gpdiv
+          q = [16, 12, 11, 6]
+          a = [[0, 1, 1, 0], [1, 0, 0, 0], [1, 0, 0, 0], [0, 0, 0, 0]]
+          assert opdiv(q, 2, conflicts=a) == 11.5
+          assert gpdiv(q, 2, conflicts=a) == 11.0
+          PY
+      - name: Publish to PyPI
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        run: python -m twine upload --non-interactive dist/*

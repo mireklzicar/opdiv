@@ -1,15 +1,16 @@
 """Fixed-cardinality portfolio objectives, independent of molecular representation."""
 
-from collections.abc import Hashable, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
-from scipy.optimize import Bounds, LinearConstraint, milp
-from scipy.sparse import coo_matrix
+from ortools.sat.python import cp_model
 
 from ._similarity import conflicts_from_similarity
+
+_OBJECTIVE_SCALE = 1_000_000_000
+_OPTIMALITY_TOLERANCE = 1e-8
 
 Status = Literal["optimal", "feasible", "infeasible", "incomplete", "unknown"]
 
@@ -20,8 +21,9 @@ class Portfolio:
 
     ``indices`` refer to input rows, ordered by descending score, then input
     index. ``value`` is None unless exactly k compatible candidates were found.
-    For pairwise selection, ``upper_bound`` bounds OPDiv; for cluster selection
-    it bounds CPDiv. Optimality and solver bounds use floating-point tolerances.
+    ``upper_bound`` bounds OPDiv, including integer-coefficient rounding error.
+    Optimality is numerical: the certified mean gap is at most 1e-8 times the
+    centered score scale, subject to floating-point arithmetic.
     """
 
     indices: tuple[int, ...]
@@ -125,10 +127,12 @@ def select(
     matrix, or neither for ordinary top-k. Candidates must already be eligible
     and distinct; matrix inputs cannot establish molecular identity.
 
-    ``optimal`` uses SciPy/HiGHS mixed-integer optimization without a time limit
+    ``optimal`` uses OR-Tools CP-SAT optimization without a time limit
     by default. ``time_limit`` limits solver seconds, excluding graph preparation.
-    A stopped search returns a feasible lower bound if available, never a falsely
-    certified metric. ``greedy`` scans by score with input-order tie breaking;
+    Integer rounding is included in the returned upper bound. Optimality is
+    certified within 1e-8 times the centered score scale. A stopped search
+    returns a feasible lower bound if available. ``greedy`` scans by score with
+    input-order tie breaking;
     underfilling does not establish infeasibility. Equally optimal portfolios may
     differ across solver versions; returned indices are always score-sorted.
     """
@@ -151,53 +155,71 @@ def select(
     if method == "greedy":
         return _result(q, picks, k, upper, "feasible" if len(picks) == k else "incomplete")
 
-    # One exact-cardinality row, followed by x_i + x_j <= 1 per conflict edge.
-    ii, jj = np.where(np.triu(a, 1))
-    edges, m = len(ii), len(q)
-    rows = np.concatenate([np.zeros(m, dtype=int), np.arange(1, edges + 1).repeat(2)])
-    cols = np.concatenate([np.arange(m), np.column_stack([ii, jj]).ravel()])
-    matrix = coo_matrix((np.ones(len(rows)), (rows, cols)), shape=(edges + 1, m)).tocsc()
-    lower = np.concatenate([[k], np.full(edges, -np.inf)])
-    upper_constraints = np.concatenate([[k], np.ones(edges)])
-    options = {"mip_rel_gap": 0.0}
-    if time_limit is not None:
-        options["time_limit"] = float(time_limit)
-    # At fixed k, centering and positive rescaling preserve the optimum. Center
-    # first so a large score offset does not hide meaningful differences.
+    # Center/rescale before integer conversion so offsets and units do not
+    # erase score differences. At fixed k this preserves the exact objective.
     center = float(np.max(q) / 2 + np.min(q) / 2)
     centered = q - center
     scale = float(np.max(np.abs(centered))) or 1.0
-    weights = centered / scale
-    solved = milp(
-        -weights,
-        integrality=np.ones(m),
-        bounds=Bounds(0, 1),
-        constraints=LinearConstraint(matrix, lower, upper_constraints),
-        options=options,
-    )
-    if solved.status == 2:
-        if len(picks) == k:
+    normalized = centered / scale
+    weights = np.rint(normalized * _OBJECTIVE_SCALE).astype(np.int64)
+    # For ANY size-k set, the largest k coefficient errors bound mean error.
+    errors = np.abs(normalized - weights / _OBJECTIVE_SCALE)
+    rounding_error = float(np.sum(np.sort(errors)[-k:] / k))
+
+    model = cp_model.CpModel()
+    x = [model.new_bool_var(f"x{i}") for i in range(len(q))]
+    model.add(sum(x) == k)
+    ii, jj = np.where(np.triu(a, 1))
+    for i, j in zip(ii, jj, strict=True):
+        model.add_at_most_one(x[i], x[j])
+    objective = sum(int(w) * var for w, var in zip(weights, x, strict=True))
+    model.maximize(objective)
+    if len(picks) == k:
+        chosen = set(picks)
+        model.add(objective >= sum(int(weights[i]) for i in picks))
+        for i, var in enumerate(x):
+            model.add_hint(var, int(i in chosen))
+    else:
+        picks = []
+
+    solver = cp_model.CpSolver()
+    solver.parameters.num_search_workers = 1
+    solver.parameters.random_seed = 20260914
+    solver.parameters.relative_gap_limit = 0
+    solver.parameters.absolute_gap_limit = 0
+    if time_limit is not None:
+        solver.parameters.max_time_in_seconds = float(time_limit)
+    code = solver.solve(model)
+    if code == cp_model.INFEASIBLE:
+        if picks:
             raise RuntimeError("Solver reported infeasibility despite a feasible greedy portfolio")
         return _result(q, [], k, None, "infeasible")
-    if solved.status not in (0, 1):
-        raise RuntimeError(f"Portfolio solver failed: {solved.message}")
-    if len(picks) != k:
-        picks = []
-    if solved.x is not None:
-        candidate = np.flatnonzero(solved.x > 0.5).tolist()
+    if code not in (cp_model.OPTIMAL, cp_model.FEASIBLE, cp_model.UNKNOWN):
+        raise RuntimeError(f"Portfolio solver failed: {solver.solution_info()}")
+
+    status = "feasible" if picks else "unknown"
+    if code in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+        candidate = [i for i, var in enumerate(x) if solver.value(var)]
         if len(candidate) != k or a[np.ix_(candidate, candidate)].any():
             raise RuntimeError("Solver returned an invalid portfolio")
-        if not picks or np.sum(weights[candidate]) > np.sum(weights[picks]):
+        if not picks or np.sum(normalized[candidate]) > np.sum(normalized[picks]):
             picks = candidate
-    if solved.status == 0 and not picks:
-        raise RuntimeError("Solver reported optimality without a portfolio")
-    bound = getattr(solved, "mip_dual_bound", None)
-    if bound is not None and np.isfinite(bound):
-        upper = min(upper, float((-bound / k) * scale + center))
-    if picks:
+        # UNKNOWN can expose an uninitialized solver bound; retain top-k then.
+        normalized_upper = (
+            solver.best_objective_bound / (_OBJECTIVE_SCALE * k) + rounding_error
+        )
+        # Small outward allowance for arithmetic in scaling and bound conversion.
+        normalized_upper += 16 * np.finfo(float).eps
+        with np.errstate(over="ignore"):
+            upper = min(upper, float(normalized_upper * scale + center))
         value = float(np.sum(q[picks] / k))
-        upper = max(upper, value)  # Protect against round-off in the solver bound.
-    status = "optimal" if solved.status == 0 else "feasible" if picks else "unknown"
+        upper = max(upper, value)
+        normalized_gap = normalized_upper - float(np.sum(normalized[picks] / k))
+        status = (
+            "optimal"
+            if code == cp_model.OPTIMAL and normalized_gap <= _OPTIMALITY_TOLERANCE
+            else "feasible"
+        )
     return _result(q, picks, k, upper, status)
 
 
@@ -213,6 +235,7 @@ def opdiv(
     """Optimal Portfolio Diversity: the best feasible size-k mean utility.
 
     Raise MetricUndefinedError for infeasibility or an unproven optimum.
+    Optimality uses the numerical tolerance documented by select().
     The exception's result retains any feasible portfolio and its bounds.
     """
     result = select(
@@ -247,45 +270,4 @@ def gpdiv(
     )
     if result.value is None:
         raise MetricUndefinedError("GPDiv", result)
-    return result.value
-
-
-def select_clusters(
-    scores: ArrayLike, k: int, labels: Sequence[Hashable], *, cap: int = 1
-) -> Portfolio:
-    """Optimal size-k selection under a uniform upper cap per disjoint cluster.
-
-    Cluster labels must be hashable, non-missing values. This policy does not
-    enforce pairwise separation. Ties follow input order. Exhaustion certifies
-    infeasibility, in contrast to pairwise greedy selection.
-    """
-    q = _inputs(scores, k)
-    if isinstance(cap, bool) or not isinstance(cap, (int, np.integer)) or cap < 1:
-        raise ValueError("cap must be a positive integer")
-    if len(labels) != len(q):
-        raise ValueError("labels must match the number of scores")
-    for label in labels:
-        try:
-            hash(label)
-            if label is None or label != label:
-                raise ValueError("labels must not contain missing values")
-        except TypeError as exc:
-            raise ValueError("labels must be hashable, non-missing values") from exc
-    picks, counts = [], {}
-    for i in np.argsort(-q, kind="stable"):
-        label = labels[i]
-        if counts.get(label, 0) < cap:
-            counts[label] = counts.get(label, 0) + 1
-            picks.append(int(i))
-            if len(picks) == k:
-                value = float(np.sum(q[picks] / k))
-                return _result(q, picks, k, value, "optimal")
-    return _result(q, picks, k, None, "infeasible")
-
-
-def cpdiv(scores: ArrayLike, k: int, labels: Sequence[Hashable], *, cap: int = 1) -> float:
-    """Clustered Portfolio Diversity; raise MetricUndefinedError if infeasible."""
-    result = select_clusters(scores, k, labels, cap=cap)
-    if result.value is None:
-        raise MetricUndefinedError("CPDiv", result)
     return result.value

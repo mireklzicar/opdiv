@@ -1,5 +1,7 @@
 # OPDiv
 
+[![PyPI](https://img.shields.io/pypi/v/opdiv.svg)](https://pypi.org/project/opdiv/)
+
 Molecular portfolio selection and diversity evaluation.
 
 Choose exactly **k** candidates with the highest mean score while enforcing a
@@ -7,16 +9,16 @@ pairwise similarity ceiling. Use the resulting mean to evaluate a screening or
 generative method's candidate archive.
 
 Implements **Optimal Portfolio Diversity (OPDiv)**, its score-ordered greedy
-approximation **GPDiv**, and the disjoint cluster-cap variant **CPDiv**, from
+approximation **GPDiv**, from
 *Measuring Diversity of Top-K Molecules as an Optimal Portfolio Selection Problem*
 by Miroslav Lžičař (preprint draft, September 2026).
 
 ## Install
 
-Python 3.10 or newer. Install the current source:
+Python 3.10 or newer:
 
 ```bash
-pip install git+https://github.com/mireklzicar/opdiv.git
+pip install opdiv
 ```
 
 For development, from this repository:
@@ -25,8 +27,7 @@ For development, from this repository:
 pip install -e '.[chem,dev]'
 ```
 
-The distribution name is `opdiv`; a PyPI release has not yet been published.
-The core requires NumPy and SciPy. The optional `chem` extra adds RDKit for
+The core requires NumPy and OR-Tools. The optional `chem` extra adds RDKit for
 building Morgan/Tanimoto similarities from SMILES.
 
 ## Select a portfolio
@@ -62,15 +63,14 @@ lower-is-better docking energies, pass their negatives.
 
 ## From molecules or custom similarities
 
-Install RDKit support from source with
-`pip install 'opdiv[chem] @ git+https://github.com/mireklzicar/opdiv.git'`.
+Install RDKit support with `pip install 'opdiv[chem]'`.
 
 ```python
 from opdiv import select, tanimoto_similarity
 
 smiles = ["CCO", "CCCO", "c1ccccc1", "CC(=O)O"]
 scores = [0.9, 0.8, 0.7, 0.6]
-similarities = tanimoto_similarity(smiles)  # Morgan radius 2, 2048 bits, chirality
+similarities = tanimoto_similarity(smiles)  # Morgan radius 2, 2048 bits, no chirality
 
 result = select(scores, k=2, similarities=similarities, max_similarity=0.4)
 selected_smiles = [smiles[i] for i in result.indices]
@@ -101,7 +101,7 @@ print(result.status, result.value, result.upper_bound, result.gap)
 
 | Status | Meaning |
 |---|---|
-| `optimal` | Optimal portfolio found, subject to floating-point solver tolerances. |
+| `optimal` | Optimum certified within the numerical tolerance below; inspect `gap`. |
 | `feasible` | Full portfolio found; its mean is a lower bound on OPDiv. |
 | `incomplete` | Greedy stopped short; another full portfolio may exist. |
 | `infeasible` | The requested capacity is proven infeasible. |
@@ -113,41 +113,40 @@ greedy result retains its indices, but has no GPDiv value at the requested k.
 Neither repeating candidates nor relaxing the diversity threshold fills a result.
 
 `opdiv(...)` raises `MetricUndefinedError` unless optimality is established;
-`gpdiv(...)` and `cpdiv(...)` raise it when their metric is undefined. The exception
+`gpdiv(...)` raises it when its metric is undefined. The exception
 has a `.result` containing the selection and available bounds. Use `select(...)`
 when you want to inspect a time-limited result rather than require a scalar metric.
 
-Optimal selection uses [SciPy's HiGHS mixed-integer solver](https://docs.scipy.org/doc/scipy/reference/generated/scipy.optimize.milp.html),
+Optimal selection uses [OR-Tools CP-SAT](https://developers.google.com/optimization/cp/cp_solver),
 with binary variables, exactly k selections, and one exclusion constraint per
-conflict edge. Scores are centered and rescaled to preserve differences despite
-large offsets; they are not rounded to integers. Relative solver gap is set to zero,
-but numerical tolerances
-still apply. This is not a symbolic exact-arithmetic certificate. Scores with
-extreme dynamic range or tiny differences need particular care.
+conflict edge. A complete greedy portfolio supplies a solver hint and an objective
+lower bound. One search worker and a fixed seed make runs reproducible within a
+solver version.
+
+Scores are centered and rescaled before conversion to integer coefficients at
+precision 1e-9 in normalized units. The largest k coefficient-rounding errors
+are included in the returned upper bound. `optimal` means CP-SAT proved the
+integer optimum and the original-score mean gap is at most 1e-8 times the
+centered score scale (the largest absolute centered score, or 1 for constant
+scores), subject to floating-point arithmetic. A small nonzero `gap` can remain
+due to rounding; extremely close portfolios can be indistinguishable at this
+precision. Returned `value` always uses the original scores.
 
 There is no default time limit; `time_limit` limits the solver only. On a stopped
 search, a complete greedy portfolio is retained if it beats the solver's candidate.
 Greedy ties follow input order. Equally optimal selections can differ between
 solver versions. Pairwise matrices require O(m²) memory; difficult conflict graphs
-can be expensive to optimize. This minimal implementation does not reproduce the
-internal experiment runner's graph reductions, prefix refinement, or benchmarks.
+can be expensive to optimize.
 
-## Cluster caps
-
-```python
-from opdiv import select_clusters, cpdiv
-
-scores = [9.0, 8.0, 7.0, 6.0]
-scaffolds = ["series-a", "series-a", "series-b", "series-c"]
-result = select_clusters(scores, k=2, labels=scaffolds, cap=1)
-print(result.indices)  # (0, 2)
-print(cpdiv(scores, k=2, labels=scaffolds, cap=1))  # 8.0
-```
-
-Score-ordered selection is optimal for a fixed disjoint partition with a uniform
-upper cap per cluster and a fixed total size. This policy does not guarantee
-pairwise separation. Exhaustion proves cluster-cap infeasibility. Weighted-rank
-extensions and other diversity baselines are outside the current package scope.
+This package uses the paper's CP-SAT backend and OPDiv/GPDiv definitions. It keeps
+a direct full-graph model; the experiment runner's clique compression, score-prefix
+relaxations, and benchmark pipeline are not included. Its normalized integer
+scaling also differs from the experiment runner's fixed score multiplier.
+For reproduction, use identical eligible candidates, row ordering, scores, and
+conflict graphs: experiment-specific threshold tolerances must be encoded in
+`conflicts` explicitly. The molecular helper matches the paper's non-chiral
+fingerprint settings; compute fingerprints from the original archived graphs
+when reproducing the archive experiments.
 
 ## Development
 
@@ -158,7 +157,7 @@ python -m build
 python -m twine check dist/*
 ```
 
-Tests compare optimal and cluster-cap results with exhaustive enumeration,
+Tests compare optimal results and rounding-aware bounds with exhaustive enumeration,
 exercise the paper's greedy failure, and cover threshold boundaries, negative
 utilities, time-limit outcomes, input validation, and optional molecular support.
 

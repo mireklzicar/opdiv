@@ -36,7 +36,7 @@ def test_morgan_tanimoto_matches_rdkit():
     smiles = ["CCO", "CCCO", "c1ccccc1", "CC(=O)O"]
     matrix = tanimoto_similarity(smiles)
     generator = rdFingerprintGenerator.GetMorganGenerator(
-        radius=2, fpSize=2048, includeChirality=True
+        radius=2, fpSize=2048, includeChirality=False
     )
     fps = [generator.GetFingerprint(Chem.MolFromSmiles(s)) for s in smiles]
     for i in range(len(smiles)):
@@ -51,3 +51,9 @@ def test_invalid_molecules(smiles):
     pytest.importorskip("rdkit")
     with pytest.raises(ValueError):
         tanimoto_similarity(smiles)
+
+
+def test_morgan_ignores_chirality_as_in_paper():
+    pytest.importorskip("rdkit")
+    s = tanimoto_similarity(["C[C@H](O)F", "C[C@@H](O)F"])
+    assert s[0, 1] == 1.0

@@ -19,7 +19,7 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Chemistry",
     "Typing :: Typed",
 ]
-dependencies = ["numpy>=1.23", "scipy>=1.11"]
+dependencies = ["numpy>=1.23", "ortools>=9.15,<10"]
 
 [project.optional-dependencies]
 chem = ["rdkit>=2023.9"]
