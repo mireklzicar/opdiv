@@ -10,8 +10,8 @@ generative method's candidate archive.
 
 Implements **Optimal Portfolio Diversity (OPDiv)**, its score-ordered greedy
 approximation **GPDiv**, from
-*Measuring Diversity of Top-K Molecules as an Optimal Portfolio Selection Problem*
-by Miroslav Lžičař (preprint draft, September 2026).
+*[OPDiv: Optimal Selection of Top-K High-Scoring, Diverse Compounds](https://arxiv.org/abs/2609.28665)*
+by Miroslav Lžičař (arXiv preprint, September 2026).
 
 ## Install
 

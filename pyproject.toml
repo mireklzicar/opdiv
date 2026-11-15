@@ -26,6 +26,7 @@ chem = ["rdkit>=2023.9"]
 dev = ["pytest>=7", "build>=1.2", "twine>=5", "ruff>=0.6"]
 
 [project.urls]
+Paper = "https://arxiv.org/abs/2609.28665"
 Repository = "https://github.com/mireklzicar/opdiv"
 Issues = "https://github.com/mireklzicar/opdiv/issues"
 

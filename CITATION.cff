@@ -1,0 +1,19 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it using this metadata."
+type: software
+title: OPDiv
+authors:
+  - family-names: "Lžičař"
+    given-names: "Miroslav"
+repository-code: "https://github.com/mireklzicar/opdiv"
+url: "https://github.com/mireklzicar/opdiv"
+license: MIT
+references:
+  - type: article
+    title: "OPDiv: Optimal Selection of Top-K High-Scoring, Diverse Compounds"
+    authors:
+      - family-names: "Lžičař"
+        given-names: "Miroslav"
+    year: 2026
+    doi: "10.48550/arXiv.2609.28665"
+    url: "https://arxiv.org/abs/2609.28665"
